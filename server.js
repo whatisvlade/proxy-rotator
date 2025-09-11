@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
-const basicAuth = require('express-basic-auth');
+const https = require('https');
+const net = require('net');
 const { URL } = require('url');
 
 const app = express();
@@ -93,7 +94,8 @@ function parseProxyUrl(proxyUrl) {
     return {
       host: url.hostname,
       port: parseInt(url.port),
-      auth: url.username + ':' + url.password
+      username: url.username,
+      password: url.password
     };
   } catch (e) {
     console.error('Error parsing proxy URL:', e);
@@ -101,34 +103,51 @@ function parseProxyUrl(proxyUrl) {
   }
 }
 
-// Получить текущий прокси (первый в списке)
+// Получить текущий прокси
 function getCurrentProxy(username) {
   const proxies = currentProxies[username];
   return proxies && proxies.length > 0 ? proxies[0] : null;
 }
 
-// Сменить прокси (первый в конец, взять новый первый)
+// Сменить прокси
 function rotateProxy(username) {
   const proxies = currentProxies[username];
   if (proxies && proxies.length > 1) {
-    const first = proxies.shift(); // Убираем первый
-    proxies.push(first); // Добавляем в конец
-    console.log(`${username}: moved ${first} to end of queue`);
+    const first = proxies.shift();
+    proxies.push(first);
+    console.log(`${username}: rotated to ${proxies[0]}`);
   }
   return getCurrentProxy(username);
 }
 
-// Проверка авторизации для прокси запросов
-function checkProxyAuth(req, res, next) {
+// Проверка авторизации
+function authenticate(req) {
   const auth = req.headers['proxy-authorization'] || req.headers['authorization'];
   
   if (!auth || !auth.startsWith('Basic ')) {
-    res.writeHead(407, {
-      'Proxy-Authenticate': 'Basic realm="Proxy Server"',
-      'Content-Type': 'text/plain'
-    });
-    res.end('407 Proxy Authentication Required');
-    return false;
+    return null;
+  }
+
+  try {
+    const credentials = Buffer.from(auth.split(' ')[1], 'base64').toString().split(':');
+    const username = credentials[0];
+    const password = credentials[1];
+
+    if (users[username] && users[username] === password) {
+      return username;
+    }
+  } catch (e) {
+    console.error('Auth error:', e);
+  }
+  
+  return null;
+}
+
+// API для смены прокси
+app.post('/rotate', (req, res) => {
+  const auth = req.headers['authorization'];
+  if (!auth || !auth.startsWith('Basic ')) {
+    return res.status(401).json({ error: 'Authorization required' });
   }
 
   try {
@@ -137,58 +156,54 @@ function checkProxyAuth(req, res, next) {
     const password = credentials[1];
 
     if (!users[username] || users[username] !== password) {
-      res.writeHead(407, {
-        'Proxy-Authenticate': 'Basic realm="Proxy Server"',
-        'Content-Type': 'text/plain'
-      });
-      res.end('407 Invalid Proxy Credentials');
-      return false;
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    req.username = username;
-    next();
-    return true;
-  } catch (e) {
-    res.writeHead(407, {
-      'Proxy-Authenticate': 'Basic realm="Proxy Server"',
-      'Content-Type': 'text/plain'
+    const oldProxy = getCurrentProxy(username);
+    const newProxy = rotateProxy(username);
+    
+    console.log(`API: ${username} rotated proxy`);
+    
+    res.json({
+      success: true,
+      oldProxy: oldProxy,
+      newProxy: newProxy,
+      message: 'Прокси сменен'
     });
-    res.end('407 Invalid Authorization Header');
-    return false;
+  } catch (e) {
+    res.status(400).json({ error: 'Invalid request' });
   }
-}
-
-// API для смены прокси
-app.post('/rotate', basicAuth({ users: users, challenge: true }), (req, res) => {
-  const username = req.auth.user;
-  const oldProxy = getCurrentProxy(username);
-  const newProxy = rotateProxy(username);
-  
-  console.log(`API: ${username} rotated from ${oldProxy} to ${newProxy}`);
-  
-  res.json({
-    success: true,
-    oldProxy: oldProxy,
-    newProxy: newProxy,
-    message: 'Прокси успешно сменен',
-    totalProxies: currentProxies[username].length
-  });
 });
 
 // API для получения текущего прокси
-app.get('/current', basicAuth({ users: users, challenge: true }), (req, res) => {
-  const username = req.auth.user;
-  const proxy = getCurrentProxy(username);
-  
-  res.json({
-    user: username,
-    currentProxy: proxy,
-    totalProxies: currentProxies[username].length,
-    queuePosition: 1
-  });
+app.get('/current', (req, res) => {
+  const auth = req.headers['authorization'];
+  if (!auth || !auth.startsWith('Basic ')) {
+    return res.status(401).json({ error: 'Authorization required' });
+  }
+
+  try {
+    const credentials = Buffer.from(auth.split(' ')[1], 'base64').toString().split(':');
+    const username = credentials[0];
+    const password = credentials[1];
+
+    if (!users[username] || users[username] !== password) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const proxy = getCurrentProxy(username);
+    
+    res.json({
+      user: username,
+      currentProxy: proxy,
+      totalProxies: currentProxies[username].length
+    });
+  } catch (e) {
+    res.status(400).json({ error: 'Invalid request' });
+  }
 });
 
-// API для статуса сервера
+// API для статуса
 app.get('/status', (req, res) => {
   res.json({
     status: 'running',
@@ -206,82 +221,28 @@ app.get('/status', (req, res) => {
   });
 });
 
-// Создаем HTTP сервер для обработки прокси запросов
-const server = http.createServer((req, res) => {
-  // Если это API запрос, передаем Express
+// Создаем HTTP сервер
+const server = http.createServer();
+
+// Обработка всех запросов
+server.on('request', (req, res) => {
+  // API запросы обрабатывает Express
   if (req.url.startsWith('/rotate') || req.url.startsWith('/current') || req.url.startsWith('/status')) {
     return app(req, res);
   }
 
-  // Обработка CONNECT запросов (HTTPS)
-  if (req.method === 'CONNECT') {
-    return handleConnect(req, res);
-  }
-
-  // Обработка обычных HTTP запросов
-  if (!checkProxyAuth(req, res, () => {})) {
+  // Прокси запросы
+  const username = authenticate(req);
+  if (!username) {
+    res.writeHead(407, {
+      'Proxy-Authenticate': 'Basic realm="Proxy"',
+      'Content-Type': 'text/plain'
+    });
+    res.end('407 Proxy Authentication Required');
     return;
   }
 
-  const username = req.username;
   const proxyUrl = getCurrentProxy(username);
-  
-  if (!proxyUrl) {
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end('500 No proxy available for user: ' + username);
-    return;
-  }
-
-  const proxyConfig = parseProxyUrl(proxyUrl);
-  if (!proxyConfig) {
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end('500 Invalid proxy configuration');
-    return;
-  }
-
-  console.log(`HTTP: ${username} -> ${proxyConfig.host}:${proxyConfig.port} -> ${req.url}`);
-
-  // Создаем запрос к целевому прокси
-  const options = {
-    hostname: proxyConfig.host,
-    port: proxyConfig.port,
-    path: req.url,
-    method: req.method,
-    headers: {
-      ...req.headers,
-      'Proxy-Authorization': `Basic ${Buffer.from(proxyConfig.auth).toString('base64')}`
-    }
-  };
-
-  // Удаляем наши заголовки авторизации
-  delete options.headers['authorization'];
-  delete options.headers['proxy-authorization'];
-
-  const proxyReq = http.request(options, (proxyRes) => {
-    res.writeHead(proxyRes.statusCode, proxyRes.headers);
-    proxyRes.pipe(res);
-  });
-
-  proxyReq.on('error', (err) => {
-    console.error(`HTTP Proxy error for ${username}:`, err.message);
-    if (!res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
-      res.end('500 Proxy Connection Error');
-    }
-  });
-
-  req.pipe(proxyReq);
-});
-
-// Обработка CONNECT запросов для HTTPS
-function handleConnect(req, res) {
-  if (!checkProxyAuth(req, res, () => {})) {
-    return;
-  }
-
-  const username = req.username;
-  const proxyUrl = getCurrentProxy(username);
-  
   if (!proxyUrl) {
     res.writeHead(500, { 'Content-Type': 'text/plain' });
     res.end('500 No proxy available');
@@ -291,24 +252,75 @@ function handleConnect(req, res) {
   const proxyConfig = parseProxyUrl(proxyUrl);
   if (!proxyConfig) {
     res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end('500 Invalid proxy configuration');
+    res.end('500 Invalid proxy config');
+    return;
+  }
+
+  console.log(`HTTP: ${username} -> ${proxyConfig.host}:${proxyConfig.port} -> ${req.url}`);
+
+  // Создаем запрос через прокси
+  const options = {
+    hostname: proxyConfig.host,
+    port: proxyConfig.port,
+    path: req.url,
+    method: req.method,
+    headers: {
+      ...req.headers,
+      'Proxy-Authorization': `Basic ${Buffer.from(`${proxyConfig.username}:${proxyConfig.password}`).toString('base64')}`
+    }
+  };
+
+  // Удаляем наши заголовки
+  delete options.headers['authorization'];
+  delete options.headers['proxy-authorization'];
+
+  const proxyReq = http.request(options, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res);
+  });
+
+  proxyReq.on('error', (err) => {
+    console.error(`Proxy error for ${username}:`, err.message);
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end('500 Proxy Error');
+    }
+  });
+
+  req.pipe(proxyReq);
+});
+
+// Обработка CONNECT запросов (HTTPS)
+server.on('connect', (req, clientSocket, head) => {
+  const username = authenticate(req);
+  if (!username) {
+    clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\n\r\n');
+    clientSocket.end();
+    return;
+  }
+
+  const proxyUrl = getCurrentProxy(username);
+  if (!proxyUrl) {
+    clientSocket.write('HTTP/1.1 500 No Proxy Available\r\n\r\n');
+    clientSocket.end();
+    return;
+  }
+
+  const proxyConfig = parseProxyUrl(proxyUrl);
+  if (!proxyConfig) {
+    clientSocket.write('HTTP/1.1 500 Invalid Proxy Config\r\n\r\n');
+    clientSocket.end();
     return;
   }
 
   console.log(`CONNECT: ${username} -> ${proxyConfig.host}:${proxyConfig.port} -> ${req.url}`);
 
-  // Подключаемся к прокси серверу
-  const net = require('net');
-  const proxySocket = net.createConnection({
-    host: proxyConfig.host,
-    port: proxyConfig.port
-  });
-
-  proxySocket.on('connect', () => {
+  // Подключаемся к прокси
+  const proxySocket = net.createConnection(proxyConfig.port, proxyConfig.host, () => {
     // Отправляем CONNECT запрос к прокси
     const connectReq = `CONNECT ${req.url} HTTP/1.1\r\n` +
                       `Host: ${req.url}\r\n` +
-                      `Proxy-Authorization: Basic ${Buffer.from(proxyConfig.auth).toString('base64')}\r\n` +
+                      `Proxy-Authorization: Basic ${Buffer.from(`${proxyConfig.username}:${proxyConfig.password}`).toString('base64')}\r\n` +
                       `\r\n`;
     
     proxySocket.write(connectReq);
@@ -320,16 +332,15 @@ function handleConnect(req, res) {
       const response = data.toString();
       if (response.includes('200') && response.includes('Connection established')) {
         headersParsed = true;
-        res.writeHead(200, 'Connection established');
-        res.end();
+        clientSocket.write('HTTP/1.1 200 Connection established\r\n\r\n');
         
         // Соединяем клиента с прокси
-        req.socket.pipe(proxySocket);
-        proxySocket.pipe(req.socket);
+        clientSocket.pipe(proxySocket);
+        proxySocket.pipe(clientSocket);
       } else {
         console.error(`CONNECT failed for ${username}: ${response}`);
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
-        res.end('500 Proxy CONNECT failed');
+        clientSocket.write('HTTP/1.1 500 Proxy Connect Failed\r\n\r\n');
+        clientSocket.end();
         proxySocket.destroy();
       }
     }
@@ -337,26 +348,20 @@ function handleConnect(req, res) {
 
   proxySocket.on('error', (err) => {
     console.error(`CONNECT error for ${username}:`, err.message);
-    if (!res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
-      res.end('500 Proxy connection error');
-    }
+    clientSocket.write('HTTP/1.1 500 Proxy Connection Error\r\n\r\n');
+    clientSocket.end();
   });
 
-  req.socket.on('error', (err) => {
-    console.error(`Client socket error for ${username}:`, err.message);
+  clientSocket.on('error', (err) => {
+    console.error(`Client socket error:`, err.message);
     proxySocket.destroy();
   });
-}
+});
 
 const PORT = process.env.PORT || 8000;
 server.listen(PORT, () => {
   console.log(`🚀 Proxy server running on port ${PORT}`);
   console.log(`📊 Client1: ${client1Proxies.length} proxies`);
   console.log(`📊 Client2: ${client2Proxies.length} proxies`);
-  console.log(`🌐 Server URL: https://proxy-rotator-e032.onrender.com`);
-  console.log(`📋 API endpoints:`);
-  console.log(`   POST /rotate - rotate proxy`);
-  console.log(`   GET /current - current proxy info`);
-  console.log(`   GET /status - server status`);
+  console.log(`🌐 Ready for connections!`);
 });
