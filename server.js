@@ -130,14 +130,12 @@ function authenticate(authHeader) {
 
 // ====== Опознание «своих» API-запросов (absolute-form + Host) ======
 const SELF_HOSTS = new Set([
-  // добавь сюда свой внешний домен/порт если меняется
   'tramway.proxy.rlwy.net:49452',
   process.env.RAILWAY_STATIC_URL || '',
   process.env.RAILWAY_PUBLIC_DOMAIN || ''
 ].filter(Boolean));
 
 function isSelfApiRequest(req) {
-  // 1) absolute-form: req.url начинается с http://... или https://...
   if (req.url.startsWith('http://') || req.url.startsWith('https://')) {
     try {
       const u = new URL(req.url);
@@ -149,7 +147,6 @@ function isSelfApiRequest(req) {
       }
     } catch {}
   }
-  // 2) origin-form: по Host заголовку
   const host = req.headers.host || '';
   if (SELF_HOSTS.has(host)) {
     const p = req.url.split('?')[0];
@@ -158,7 +155,7 @@ function isSelfApiRequest(req) {
   return false;
 }
 
-// Закрываем keep-alive на API (необязательно, но чище)
+// Закрываем keep-alive на API
 app.use((req, res, next) => { res.setHeader('Connection', 'close'); next(); });
 
 // ====== API ======
@@ -240,7 +237,7 @@ Auth: Basic (client1/pass123 или client2/pass456)
 // ====== Прокси-сервер ======
 const server = http.createServer();
 
-// -------- HTTP (origin-form) c авто-фейловером ----------
+// -------- HTTP (origin/absolute-form) c авто-фейловером ----------
 async function handleHttpProxy(req, res, user, attempt = 1, maxAttempts = 2) {
   const up = parseProxyUrl(getCurrentProxy(user));
   if (!up) { res.writeHead(502); return res.end('502 No upstream'); }
@@ -259,12 +256,11 @@ async function handleHttpProxy(req, res, user, attempt = 1, maxAttempts = 2) {
     },
     timeout: 20000
   };
-  delete options.headers['proxy-authorization']; // мы уже аутентифицировали клиента
+  delete options.headers['proxy-authorization'];
 
   const proxyReq = http.request(options, (proxyRes) => {
-    // если апстрим дал 407/502/503 — пробуем другой
     if ([407, 502, 503].includes(proxyRes.statusCode) && attempt < maxAttempts) {
-      proxyRes.resume(); // съедаем тело
+      proxyRes.resume();
       rotateProxy(user);
       return handleHttpProxy(req, res, user, attempt + 1, maxAttempts);
     }
@@ -340,7 +336,6 @@ function tryConnect(req, clientSocket, user, attempt = 1, maxAttempts = 2) {
         clientSocket.pipe(proxySocket);
         proxySocket.pipe(clientSocket);
       } else {
-        // апстрим отверг CONNECT — пробуем другой
         proxySocket.end();
         if (attempt < maxAttempts) {
           rotateProxy(user);
@@ -365,7 +360,7 @@ function tryConnect(req, clientSocket, user, attempt = 1, maxAttempts = 2) {
   clientSocket.on('error', () => { try { proxySocket.destroy(); } catch {} });
 }
 
-server.on('connect', (req, clientSocket, head) => {
+server.on('connect', (req, clientSocket) => {
   const user = authenticate(req.headers['proxy-authorization']);
   if (!user) {
     clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="Proxy"\r\n\r\n');
