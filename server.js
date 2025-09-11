@@ -1,7 +1,10 @@
-// server.js (Railway TCP Proxy)
-// Запускать так (по умолчанию хост уже задан):
-//   PUBLIC_HOST=tramway.proxy.rlwy.net:49452 node server.js
-// или просто: node server.js
+// server.js (Railway TCP Proxy) — multi-alias, host-only self-API match
+//
+// Важные переменные окружения (в Railway → Variables):
+//   PUBLIC_HOST = <основной публичный адрес с портом, например: nozomi.proxy.rlwy.net:58990>
+//   EXTRA_HOSTS = <доп. алиасы через запятую, можно без порта, напр: tramway.proxy.rlwy.net,nozomi.proxy.rlwy.net>
+//
+// Если переменные не заданы — возьмём дефолт tramway:49452, но лучше выставить правильно.
 
 const express = require('express');
 const http = require('http');
@@ -130,42 +133,38 @@ function authenticate(authHeader) {
 }
 
 // ====== Опознание «своих» API-запросов (absolute-form + Host) ======
+// Главная фишка: сравниваем только hostname (без порта), чтобы ловить и tramway*, и nozomi*.
 const PUBLIC_HOST = (process.env.PUBLIC_HOST || 'tramway.proxy.rlwy.net:49452').toLowerCase();
+const EXTRA_HOSTS = (process.env.EXTRA_HOSTS || '')
+  .split(',')
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
 
-function expandHostVariants(h) {
-  if (!h) return [];
-  const out = new Set();
-  const low = h.toLowerCase();
-  out.add(low);
-  const [name, port] = low.split(':');
-  if (name) {
-    out.add(name);
-    out.add(`${name}:443`);
-    out.add(`${name}:80`);
-    if (port) out.add(`${name}:${port}`);
-  }
-  return [...out];
-}
-
-const SELF_HOSTS = new Set([
-  ...expandHostVariants(PUBLIC_HOST),
-  ...expandHostVariants(process.env.RAILWAY_STATIC_URL || ''),
-  ...expandHostVariants(process.env.RAILWAY_PUBLIC_DOMAIN || '')
+// итоговый набор только hostnames (без портов)
+const SELF_HOSTNAMES = new Set([
+  // из PUBLIC_HOST
+  PUBLIC_HOST.split(':')[0],
+  // дополнительные алиасы
+  ...EXTRA_HOSTS.map(h => h.split(':')[0]),
+  // railway домены, если заданы
+  ...(process.env.RAILWAY_STATIC_URL ? [String(process.env.RAILWAY_STATIC_URL).toLowerCase().split(':')[0]] : []),
+  ...(process.env.RAILWAY_PUBLIC_DOMAIN ? [String(process.env.RAILWAY_PUBLIC_DOMAIN).toLowerCase().split(':')[0]] : [])
 ].filter(Boolean));
 
 function isSelfApiRequest(req) {
   try {
-    // absolute-form
+    // 1) absolute-form (http://host:port/path)
     if (req.url.startsWith('http://') || req.url.startsWith('https://')) {
       const u = new URL(req.url);
-      if (SELF_HOSTS.has(u.host.toLowerCase())) {
+      if (SELF_HOSTNAMES.has(u.hostname.toLowerCase())) {
         const p = u.pathname;
         return p === '/' || p.startsWith('/status') || p.startsWith('/current') || p.startsWith('/rotate');
       }
     }
-    // origin-form
-    const host = (req.headers.host || '').toLowerCase();
-    if (SELF_HOSTS.has(host)) {
+    // 2) origin-form: по Host заголовку
+    const hostHeader = (req.headers.host || '').toLowerCase();
+    const onlyHost = hostHeader.split(':')[0];
+    if (SELF_HOSTNAMES.has(onlyHost)) {
       const p = (req.url || '').split('?')[0];
       return p === '/' || p.startsWith('/status') || p.startsWith('/current') || p.startsWith('/rotate');
     }
@@ -173,7 +172,7 @@ function isSelfApiRequest(req) {
   return false;
 }
 
-// Закрываем keep-alive на API
+// Закрываем keep-alive на API (чисто)
 app.use((req, res, next) => { res.setHeader('Connection', 'close'); next(); });
 
 // ====== API ======
@@ -222,6 +221,7 @@ app.get('/status', (req, res) => {
     platform: 'Railway TCP Proxy',
     port: PORT,
     publicHost: PUBLIC_HOST,
+    selfHostnames: [...SELF_HOSTNAMES],
     clients: {
       client1: {
         totalProxies: client1Proxies.length,
@@ -244,8 +244,9 @@ app.get('/', (req, res) => {
   res.send(`
     <h1>🚀 Railway Proxy Rotator</h1>
     <pre>
-Host: ${PUBLIC_HOST.split(':')[0]}
-Port: ${PUBLIC_HOST.split(':')[1] || '80/443'}
+Public host: ${PUBLIC_HOST}
+Known hostnames: ${[...SELF_HOSTNAMES].join(', ')}
+
 Auth: Basic (client1/pass123 или client2/pass456)
     </pre>
     <ul>
@@ -307,7 +308,6 @@ async function handleHttpProxy(req, res, user, attempt = 1, maxAttempts = 2) {
 
 server.on('request', (req, res) => {
   if (isSelfApiRequest(req)) {
-    // чтобы в логах было видно, что API схватили локально
     const host = req.headers.host || '(no-host)';
     console.log(`[SELF-API] ${req.method} ${req.url} Host:${host}`);
     return app(req, res);
@@ -401,5 +401,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Public (TCP Proxy): ${PUBLIC_HOST}`);
   console.log(`📊 Client1: ${client1Proxies.length} proxies`);
   console.log(`📊 Client2: ${client2Proxies.length} proxies`);
-  console.log(`✅ API self-hosts:`, [...SELF_HOSTS].join(', '));
+  console.log(`✅ API self hostnames: ${[...SELF_HOSTNAMES].join(', ')}`);
 });
