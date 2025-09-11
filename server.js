@@ -1,4 +1,8 @@
-// server.js
+// server.js (Railway TCP Proxy)
+// Запускать так (по умолчанию хост уже задан):
+//   PUBLIC_HOST=tramway.proxy.rlwy.net:49452 node server.js
+// или просто: node server.js
+
 const express = require('express');
 const http = require('http');
 const net = require('net');
@@ -103,12 +107,10 @@ function parseProxyUrl(proxyUrl) {
     return { host: u.hostname, port: +u.port, username: u.username, password: u.password };
   } catch { return null; }
 }
-
 function getCurrentProxy(username) {
   const list = currentProxies[username];
   return (list && list[0]) || null;
 }
-
 function rotateProxy(username) {
   const list = currentProxies[username];
   if (!list || list.length <= 1) return getCurrentProxy(username);
@@ -119,7 +121,6 @@ function rotateProxy(username) {
   console.log(`🔄 ROTATE ${username}: ${oldProxy.split('@')[1]} -> ${newProxy.split('@')[1]} (#${rotationCounters[username]})`);
   return newProxy;
 }
-
 function authenticate(authHeader) {
   if (!authHeader || !authHeader.startsWith('Basic ')) return null;
   try {
@@ -129,29 +130,46 @@ function authenticate(authHeader) {
 }
 
 // ====== Опознание «своих» API-запросов (absolute-form + Host) ======
+const PUBLIC_HOST = (process.env.PUBLIC_HOST || 'tramway.proxy.rlwy.net:49452').toLowerCase();
+
+function expandHostVariants(h) {
+  if (!h) return [];
+  const out = new Set();
+  const low = h.toLowerCase();
+  out.add(low);
+  const [name, port] = low.split(':');
+  if (name) {
+    out.add(name);
+    out.add(`${name}:443`);
+    out.add(`${name}:80`);
+    if (port) out.add(`${name}:${port}`);
+  }
+  return [...out];
+}
+
 const SELF_HOSTS = new Set([
-  'tramway.proxy.rlwy.net:49452',
-  process.env.RAILWAY_STATIC_URL || '',
-  process.env.RAILWAY_PUBLIC_DOMAIN || ''
+  ...expandHostVariants(PUBLIC_HOST),
+  ...expandHostVariants(process.env.RAILWAY_STATIC_URL || ''),
+  ...expandHostVariants(process.env.RAILWAY_PUBLIC_DOMAIN || '')
 ].filter(Boolean));
 
 function isSelfApiRequest(req) {
-  if (req.url.startsWith('http://') || req.url.startsWith('https://')) {
-    try {
+  try {
+    // absolute-form
+    if (req.url.startsWith('http://') || req.url.startsWith('https://')) {
       const u = new URL(req.url);
-      if (SELF_HOSTS.has(u.host)) {
-        return u.pathname === '/' ||
-               u.pathname.startsWith('/status') ||
-               u.pathname.startsWith('/current') ||
-               u.pathname.startsWith('/rotate');
+      if (SELF_HOSTS.has(u.host.toLowerCase())) {
+        const p = u.pathname;
+        return p === '/' || p.startsWith('/status') || p.startsWith('/current') || p.startsWith('/rotate');
       }
-    } catch {}
-  }
-  const host = req.headers.host || '';
-  if (SELF_HOSTS.has(host)) {
-    const p = req.url.split('?')[0];
-    return p === '/' || p.startsWith('/status') || p.startsWith('/current') || p.startsWith('/rotate');
-  }
+    }
+    // origin-form
+    const host = (req.headers.host || '').toLowerCase();
+    if (SELF_HOSTS.has(host)) {
+      const p = (req.url || '').split('?')[0];
+      return p === '/' || p.startsWith('/status') || p.startsWith('/current') || p.startsWith('/rotate');
+    }
+  } catch {}
   return false;
 }
 
@@ -166,6 +184,8 @@ app.post('/rotate', (req, res) => {
   const oldProxy = getCurrentProxy(user);
   const newProxy = rotateProxy(user);
   const killed = closeUserTunnels(user);
+
+  console.log(`[API] POST /rotate user=${user} killed=${killed} ${oldProxy?.split('@')[1]} -> ${newProxy?.split('@')[1]}`);
 
   res.json({
     success: true,
@@ -183,6 +203,9 @@ app.get('/current', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
   const cur = getCurrentProxy(user);
+
+  console.log(`[API] GET /current user=${user} -> ${cur?.split('@')[1]}`);
+
   res.json({
     user,
     currentProxy: cur?.split('@')[1],
@@ -198,7 +221,7 @@ app.get('/status', (req, res) => {
     status: 'running',
     platform: 'Railway TCP Proxy',
     port: PORT,
-    publicHost: 'tramway.proxy.rlwy.net:49452',
+    publicHost: PUBLIC_HOST,
     clients: {
       client1: {
         totalProxies: client1Proxies.length,
@@ -221,8 +244,8 @@ app.get('/', (req, res) => {
   res.send(`
     <h1>🚀 Railway Proxy Rotator</h1>
     <pre>
-Host: tramway.proxy.rlwy.net
-Port: 49452
+Host: ${PUBLIC_HOST.split(':')[0]}
+Port: ${PUBLIC_HOST.split(':')[1] || '80/443'}
 Auth: Basic (client1/pass123 или client2/pass456)
     </pre>
     <ul>
@@ -283,8 +306,10 @@ async function handleHttpProxy(req, res, user, attempt = 1, maxAttempts = 2) {
 }
 
 server.on('request', (req, res) => {
-  // Перехват «своих» API даже в absolute-form
   if (isSelfApiRequest(req)) {
+    // чтобы в логах было видно, что API схватили локально
+    const host = req.headers.host || '(no-host)';
+    console.log(`[SELF-API] ${req.method} ${req.url} Host:${host}`);
     return app(req, res);
   }
 
@@ -373,7 +398,7 @@ server.on('connect', (req, clientSocket) => {
 const PORT = process.env.PORT || process.env.RAILWAY_PORT || 8080;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Proxy server running on port ${PORT}`);
-  console.log(`🌐 Public (TCP Proxy): tramway.proxy.rlwy.net:49452`);
+  console.log(`🌐 Public (TCP Proxy): ${PUBLIC_HOST}`);
   console.log(`📊 Client1: ${client1Proxies.length} proxies`);
   console.log(`📊 Client2: ${client2Proxies.length} proxies`);
   console.log(`✅ API self-hosts:`, [...SELF_HOSTS].join(', '));
