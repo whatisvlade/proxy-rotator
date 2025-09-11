@@ -74,7 +74,15 @@ const client2Proxies = [
 ];
 
 const users = { 'client1': 'pass123', 'client2': 'pass456' };
-const currentProxies = { 'client1': [...client1Proxies], 'client2': [...client2Proxies] };
+
+// Инициализация текущих прокси
+const currentProxies = { 
+  'client1': [...client1Proxies], 
+  'client2': [...client2Proxies] 
+};
+
+// Счетчики ротации
+let rotationCounters = { 'client1': 0, 'client2': 0 };
 
 function parseProxyUrl(proxyUrl) {
   try {
@@ -85,16 +93,24 @@ function parseProxyUrl(proxyUrl) {
 
 function getCurrentProxy(username) {
   const proxies = currentProxies[username];
-  return proxies && proxies.length > 0 ? proxies[0] : null;
+  if (!proxies || proxies.length === 0) return null;
+  return proxies[0];
 }
 
 function rotateProxy(username) {
   const proxies = currentProxies[username];
-  if (proxies && proxies.length > 1) {
-    const first = proxies.shift();
-    proxies.push(first);
-  }
-  return getCurrentProxy(username);
+  if (!proxies || proxies.length <= 1) return getCurrentProxy(username);
+  
+  const oldProxy = proxies.shift();
+  proxies.push(oldProxy);
+  rotationCounters[username]++;
+  
+  const newProxy = getCurrentProxy(username);
+  const oldIP = oldProxy.split('@')[1];
+  const newIP = newProxy.split('@')[1];
+  console.log(`🔄 MANUAL ROTATION ${username}: ${oldIP} -> ${newIP} (count: ${rotationCounters[username]})`);
+  
+  return newProxy;
 }
 
 function authenticate(authHeader) {
@@ -108,68 +124,105 @@ function authenticate(authHeader) {
   return null;
 }
 
-// API
+// API endpoints
 app.post('/rotate', (req, res) => {
   const username = authenticate(req.headers['authorization']);
   if (!username) return res.status(401).json({ error: 'Unauthorized' });
+  
   const oldProxy = getCurrentProxy(username);
   const newProxy = rotateProxy(username);
-  res.json({ success: true, oldProxy, newProxy });
+  
+  res.json({ 
+    success: true, 
+    message: 'Proxy rotated manually',
+    oldProxy: oldProxy?.split('@')[1], 
+    newProxy: newProxy?.split('@')[1],
+    rotationCount: rotationCounters[username],
+    totalProxies: currentProxies[username].length
+  });
 });
 
 app.get('/current', (req, res) => {
   const username = authenticate(req.headers['authorization']);
   if (!username) return res.status(401).json({ error: 'Unauthorized' });
-  res.json({ user: username, currentProxy: getCurrentProxy(username), totalProxies: currentProxies[username].length });
-});
-
-app.get('/status', (req, res) => {
-  res.json({
-    status: 'running',
-    port: PORT,
-    url: `https://proxy-rotator-e032.onrender.com`,
-    clients: {
-      client1: { totalProxies: client1Proxies.length, currentProxy: getCurrentProxy('client1') },
-      client2: { totalProxies: client2Proxies.length, currentProxy: getCurrentProxy('client2') }
-    }
+  
+  const currentProxy = getCurrentProxy(username);
+  
+  res.json({ 
+    user: username, 
+    currentProxy: currentProxy?.split('@')[1],
+    fullProxy: currentProxy,
+    totalProxies: currentProxies[username].length,
+    rotationCount: rotationCounters[username]
   });
 });
 
-// Главная страница с инструкциями
+app.get('/status', (req, res) => {
+  const railwayUrl = process.env.RAILWAY_STATIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost';
+  res.json({
+    status: 'running',
+    platform: 'Railway',
+    port: PORT,
+    url: `https://${railwayUrl}`,
+    rotationType: 'Manual Only',
+    clients: {
+      client1: { 
+        totalProxies: client1Proxies.length, 
+        currentProxy: getCurrentProxy('client1')?.split('@')[1],
+        rotationCount: rotationCounters['client1']
+      },
+      client2: { 
+        totalProxies: client2Proxies.length, 
+        currentProxy: getCurrentProxy('client2')?.split('@')[1],
+        rotationCount: rotationCounters['client2']
+      }
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Главная страница
 app.get('/', (req, res) => {
+  const railwayUrl = process.env.RAILWAY_STATIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost';
   res.send(`
-    <h1>🚀 Proxy Rotator Server</h1>
-    <h2>📋 Настройки для Super Proxy:</h2>
+    <h1>🚀 Railway Proxy Rotator (Manual Only)</h1>
+    <h2>📋 Настройки для прокси-клиентов:</h2>
     <pre>
-Сервер: proxy-rotator-e032.onrender.com
-Порт: БЕЗ ПОРТА (оставить пустым)
+Сервер: ${railwayUrl}
+Порт: 80 или 443 (или без порта)
 Тип: HTTP Proxy
 Логин: client1 или client2
 Пароль: pass123 или pass456
     </pre>
     
-    <h2>🔧 Альтернативные настройки:</h2>
-    <pre>
-Вариант 1: proxy-rotator-e032.onrender.com:443
-Вариант 2: proxy-rotator-e032.onrender.com:80
-    </pre>
+    <h2>🔄 Ротация: ТОЛЬКО по кнопке в Tampermonkey</h2>
+    <p><strong>Автоматической ротации НЕТ!</strong> Прокси меняется только при нажатии кнопки.</p>
+    
+    <h2>📊 Текущие прокси:</h2>
+    <ul>
+      <li><strong>client1:</strong> ${getCurrentProxy('client1')?.split('@')[1] || 'N/A'} 
+          (ротаций: ${rotationCounters['client1']})</li>
+      <li><strong>client2:</strong> ${getCurrentProxy('client2')?.split('@')[1] || 'N/A'} 
+          (ротаций: ${rotationCounters['client2']})</li>
+    </ul>
     
     <h2>📊 API:</h2>
     <ul>
       <li><a href="/status">GET /status</a> - статус сервера</li>
-      <li>POST /rotate - смена прокси</li>
+      <li>POST /rotate - смена прокси (только через Tampermonkey)</li>
       <li>GET /current - текущий прокси</li>
     </ul>
     
-    <p><strong>Статус:</strong> ✅ Сервер работает на порту ${PORT}</p>
+    <p><strong>Статус:</strong> ✅ Railway сервер работает на порту ${PORT}</p>
+    <p><strong>Время:</strong> ${new Date().toLocaleString()}</p>
   `);
 });
 
-// HTTP сервер
+// HTTP сервер с прокси поддержкой
 const server = http.createServer();
 
 server.on('request', (req, res) => {
-  // API и веб-страницы через Express
+  // API запросы
   if (req.url === '/' || req.url.startsWith('/rotate') || req.url.startsWith('/current') || req.url.startsWith('/status')) {
     return app(req, res);
   }
@@ -227,6 +280,7 @@ server.on('request', (req, res) => {
   req.pipe(proxyReq);
 });
 
+// CONNECT для HTTPS
 server.on('connect', (req, clientSocket, head) => {
   const username = authenticate(req.headers['proxy-authorization']);
   if (!username) {
@@ -284,15 +338,12 @@ server.on('connect', (req, clientSocket, head) => {
   clientSocket.on('error', () => proxySocket.destroy());
 });
 
-const PORT = process.env.PORT || 8000;
-server.listen(PORT, () => {
-  console.log(`🚀 Proxy server running on port ${PORT}`);
-  console.log(`🌐 URL: https://proxy-rotator-e032.onrender.com`);
-  console.log(`📊 Client1: ${client1Proxies.length} proxies`);
-  console.log(`📊 Client2: ${client2Proxies.length} proxies`);
-  console.log(`\n📋 Super Proxy settings:`);
-  console.log(`   Server: proxy-rotator-e032.onrender.com`);
-  console.log(`   Port: (leave empty) or try 443/80`);
-  console.log(`   Login: client1 or client2`);
-  console.log(`   Password: pass123 or pass456`);
+const PORT = process.env.PORT || process.env.RAILWAY_PORT || 8000;
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Railway Proxy server running on port ${PORT}`);
+  console.log(`🌐 Platform: Railway (Manual Rotation Only)`);
+  console.log(`📊 Client1: ${client1Proxies.length} proxies, current: ${getCurrentProxy('client1')?.split('@')[1]}`);
+  console.log(`📊 Client2: ${client2Proxies.length} proxies, current: ${getCurrentProxy('client2')?.split('@')[1]}`);
+  console.log(`🔄 Rotation: Only via Tampermonkey button!`);
+  console.log(`✅ Ready for manual proxy rotation!`);
 });
