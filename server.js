@@ -1,11 +1,3 @@
-// server.js (Railway TCP Proxy) — multi-alias, host-only self-API match
-//
-// Важные переменные окружения (в Railway → Variables):
-//   PUBLIC_HOST = <основной публичный адрес с портом, например: nozomi.proxy.rlwy.net:58990>
-//   EXTRA_HOSTS = <доп. алиасы через запятую, можно без порта, напр: tramway.proxy.rlwy.net,nozomi.proxy.rlwy.net>
-//
-// Если переменные не заданы — возьмём дефолт tramway:49452, но лучше выставить правильно.
-
 const express = require('express');
 const http = require('http');
 const net = require('net');
@@ -19,69 +11,32 @@ const users = { client1: 'pass123', client2: 'pass456' };
 
 // ====== Апстрим-прокси списки ======
 const client1Proxies = [
-  'http://5NDcu6:EAZSkX@212.81.39.66:9401',
-  'http://5NDcu6:EAZSkX@212.81.38.83:9925',
-  'http://5NDcu6:EAZSkX@212.81.39.148:9560',
-  'http://5NDcu6:EAZSkX@212.81.38.110:9488',
-  'http://5NDcu6:EAZSkX@212.81.37.208:9353',
-  'http://5NDcu6:EAZSkX@212.81.38.203:9541',
-  'http://5NDcu6:EAZSkX@212.81.36.230:9752',
-  'http://5NDcu6:EAZSkX@212.81.39.197:9982',
-  'http://5NDcu6:EAZSkX@212.81.36.140:9419',
-  'http://5NDcu6:EAZSkX@212.81.39.159:9466',
-  'http://5NDcu6:EAZSkX@212.81.39.191:9277',
-  'http://5NDcu6:EAZSkX@212.81.39.168:9460',
-  'http://5NDcu6:EAZSkX@212.81.37.16:9290',
-  'http://5NDcu6:EAZSkX@212.81.38.33:9541',
-  'http://5NDcu6:EAZSkX@212.81.37.186:9716',
-  'http://5NDcu6:EAZSkX@212.81.38.144:9994',
-  'http://5NDcu6:EAZSkX@212.81.38.132:9674',
-  'http://5NDcu6:EAZSkX@212.81.39.42:9528',
-  'http://5NDcu6:EAZSkX@212.81.39.155:9926',
-  'http://5NDcu6:EAZSkX@194.67.223.167:9988',
-  'http://5NDcu6:EAZSkX@194.67.220.77:9907',
-  'http://5NDcu6:EAZSkX@194.67.219.72:9725',
-  'http://5NDcu6:EAZSkX@194.67.219.82:9400',
-  'http://5NDcu6:EAZSkX@194.67.221.176:9241',
-  'http://5NDcu6:EAZSkX@193.31.100.247:9275',
-  'http://5NDcu6:EAZSkX@193.31.101.117:9649',
-  'http://5NDcu6:EAZSkX@194.124.49.75:9492',
-  'http://5NDcu6:EAZSkX@194.226.233.71:9841',
-  'http://5NDcu6:EAZSkX@194.226.233.130:9235'
+'http://2ue16J:pCgcm8@194.67.219.212:9391',
+'http://2ue16J:pCgcm8@194.67.221.184:9514',
+'http://2ue16J:pCgcm8@194.67.219.169:9060',
+'http://UoERJB:p6n6ns@193.31.100.119:9374',
+'http://UoERJB:p6n6ns@193.31.101.146:9400',
+'http://UoERJB:p6n6ns@193.31.101.7:9432',
+'http://UoERJB:p6n6ns@193.31.101.231:9641',
+'http://UoERJB:p6n6ns@193.31.100.36:9929',
+'http://UoERJB:p6n6ns@193.31.102.71:9403',
+'http://UoERJB:p6n6ns@193.31.103.239:9590',
+'http://UoERJB:p6n6ns@193.31.101.100:9334',
+'http://UoERJB:p6n6ns@193.31.101.221:9332',
+'http://UoERJB:p6n6ns@193.31.102.50:9114'
 ];
 
 const client2Proxies = [
-  'http://5NDcu6:EAZSkX@194.226.234.140:9860',
-  'http://5NDcu6:EAZSkX@194.226.234.46:9174',
-  'http://5NDcu6:EAZSkX@194.226.234.166:9036',
-  'http://5NDcu6:EAZSkX@194.226.233.109:9686',
-  'http://5NDcu6:EAZSkX@194.226.235.14:9681',
-  'http://5NDcu6:EAZSkX@194.226.235.179:9449',
-  'http://5NDcu6:EAZSkX@194.226.235.166:9820',
-  'http://5NDcu6:EAZSkX@194.226.235.145:9138',
-  'http://5NDcu6:EAZSkX@194.226.234.19:9952',
-  'http://5NDcu6:EAZSkX@194.226.233.126:9670',
-  'http://5NDcu6:EAZSkX@194.226.233.137:9114',
-  'http://RFANYW:Ujk7cU@46.161.45.39:9920',
-  'http://RFANYW:Ujk7cU@46.161.46.183:9037',
-  'http://RFANYW:Ujk7cU@46.161.46.27:9074',
-  'http://RFANYW:Ujk7cU@46.161.44.42:9349',
-  'http://RFANYW:Ujk7cU@46.161.44.220:9945',
-  'http://RFANYW:Ujk7cU@46.161.47.28:9823',
-  'http://RFANYW:Ujk7cU@46.161.44.196:9466',
-  'http://RFANYW:Ujk7cU@46.161.46.133:9593',
-  'http://RFANYW:Ujk7cU@46.161.47.148:9601',
-  'http://RFANYW:Ujk7cU@46.161.45.205:9044',
-  'http://RFANYW:Ujk7cU@46.161.45.244:9521',
-  'http://RFANYW:Ujk7cU@46.161.47.97:9360',
-  'http://RFANYW:Ujk7cU@46.161.46.237:9249',
-  'http://RFANYW:Ujk7cU@46.161.47.163:9094',
-  'http://RFANYW:Ujk7cU@46.161.47.228:9926',
-  'http://RFANYW:Ujk7cU@46.161.44.204:9892',
-  'http://RFANYW:Ujk7cU@46.161.44.173:9081',
-  'http://RFANYW:Ujk7cU@46.161.46.171:9121',
-  'http://RFANYW:Ujk7cU@31.44.188.26:9910',
-  'http://RFANYW:Ujk7cU@31.44.189.64:9878'
+'http://UoERJB:p6n6ns@193.31.102.65:9234',
+'http://UoERJB:p6n6ns@193.31.101.36:9594',
+'http://UoERJB:p6n6ns@193.31.101.106:9176',
+'http://UoERJB:p6n6ns@193.31.103.117:9560',
+'http://UoERJB:p6n6ns@193.31.102.207:9791',
+'http://UoERJB:p6n6ns@193.31.103.230:9089',
+'http://UoERJB:p6n6ns@193.31.103.211:9859',
+'http://UoERJB:p6n6ns@193.31.101.217:9861',
+'http://UoERJB:p6n6ns@193.31.100.100:9744',
+'http://UoERJB:p6n6ns@193.31.102.55:9283'
 ];
 
 // ====== Состояние/ротация ======
