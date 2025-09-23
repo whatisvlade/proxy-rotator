@@ -8,13 +8,15 @@ const tls = require('tls');
 const { URL } = require('url');
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+
+// ====== Глобальные таймауты для апстрима ======
+const UP_TIMEOUT_MS = Number(process.env.UP_TIMEOUT_MS || 35000);
 
 // ====== CORS (смягчённый, можно ограничить Origin ниже) ======
 app.use((req, res, next) => {
   // при желании замени '*' на конкретный домен, например:
   // const origin = req.headers.origin;
-  // if (/^https?:\/\/(belarus\.blsspainglobal\.com)$/.test(new URL(origin).hostname)) {
+  // if (origin && /(^|\.)belarus\.blsspainglobal\.com$/.test(new URL(origin).hostname)) {
   //   res.setHeader('Access-Control-Allow-Origin', origin);
   // } else {
   //   res.setHeader('Access-Control-Allow-Origin', 'https://belarus.blsspainglobal.com');
@@ -182,7 +184,7 @@ async function requestViaUpstream({ url, method = 'GET', headers = {}, body = nu
           'Proxy-Authorization': `Basic ${Buffer.from(`${up.username}:${up.password}`).toString('base64')}`,
           'Connection': 'close'
         },
-        timeout: 20000
+        timeout: UP_TIMEOUT_MS
       }, (r) => {
         const chunks = [];
         r.on('data', d => chunks.push(d));
@@ -212,7 +214,7 @@ async function requestViaUpstream({ url, method = 'GET', headers = {}, body = nu
           'Proxy-Authorization': `Basic ${auth}`,
           'Connection': 'close'
         },
-        timeout: 20000
+        timeout: UP_TIMEOUT_MS
       });
 
       connectReq.on('connect', (_res, socket, _head) => {
@@ -225,7 +227,7 @@ async function requestViaUpstream({ url, method = 'GET', headers = {}, body = nu
             method,
             path: target.pathname + (target.search || ''),
             headers: { ...headers, 'Connection': 'close' },
-            timeout: 20000,
+            timeout: UP_TIMEOUT_MS,
             createConnection: () => tlsSocket
           }, (r) => {
             const chunks = [];
@@ -361,7 +363,7 @@ app.get('/whoami', async (req, res) => {
 });
 
 // ====== /fetch — универсальный прокси-запрос через текущий upstream ======
-app.post('/fetch', async (req, res) => {
+app.post('/fetch', express.json({ limit: '2mb' }), async (req, res) => {
   const user = authenticate(req.headers['authorization']);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -451,7 +453,7 @@ async function handleHttpProxy(req, res, user) {
       'Proxy-Authorization': `Basic ${Buffer.from(`${up.username}:${up.password}`).toString('base64')}`,
       'Connection': 'close'
     },
-    timeout: 20000
+    timeout: UP_TIMEOUT_MS
   };
   delete options.headers['proxy-authorization'];
 
@@ -471,21 +473,11 @@ async function handleHttpProxy(req, res, user) {
   req.pipe(proxyReq);
 }
 
-server.on('request', (req, res) => {
-  if (isSelfApiRequest(req)) {
-    const host = req.headers.host || '(no-host)';
-    console.log(`[SELF-API] ${req.method} ${req.url} Host:${host}`);
-    return app(req, res);
-  }
-
-  const user = authenticate(req.headers['proxy-authorization']);
-  if (!user) {
-    res.writeHead(407, { 'Proxy-Authenticate': 'Basic realm="Proxy"' });
-    return res.end('407 Proxy Authentication Required');
-  }
-
-  handleHttpProxy(req, res, user);
-});
+// вспомогательная проверка: запретить CONNECT на «самого себя»
+function isSelfHost(h) {
+  const host = (h || '').toLowerCase().split(':')[0];
+  return SELF_HOSTNAMES.has(host);
+}
 
 // -------- CONNECT (HTTPS) БЕЗ авто-ротации ----------
 function tryConnect(req, clientSocket, user) {
@@ -505,8 +497,8 @@ function tryConnect(req, clientSocket, user) {
   proxySocket.on('close', cleanup);
   clientSocket.on('close', cleanup);
 
-  proxySocket.setTimeout(30000, () => proxySocket.destroy(new Error('upstream timeout')));
-  clientSocket.setTimeout(30000, () => clientSocket.destroy(new Error('client timeout')));
+  proxySocket.setTimeout(UP_TIMEOUT_MS, () => proxySocket.destroy(new Error('upstream timeout')));
+  clientSocket.setTimeout(UP_TIMEOUT_MS, () => clientSocket.destroy(new Error('client timeout')));
 
   proxySocket.on('connect', () => {
     const auth = Buffer.from(`${up.username}:${up.password}`).toString('base64');
@@ -542,7 +534,30 @@ function tryConnect(req, clientSocket, user) {
   clientSocket.on('error', () => { try { proxySocket.destroy(); } catch {} });
 }
 
+server.on('request', (req, res) => {
+  if (isSelfApiRequest(req)) {
+    const host = req.headers.host || '(no-host)';
+    console.log(`[SELF-API] ${req.method} ${req.url} Host:${host}`);
+    return app(req, res);
+  }
+
+  const user = authenticate(req.headers['proxy-authorization']);
+  if (!user) {
+    res.writeHead(407, { 'Proxy-Authenticate': 'Basic realm="Proxy"' });
+    return res.end('407 Proxy Authentication Required');
+  }
+
+  handleHttpProxy(req, res, user);
+});
+
 server.on('connect', (req, clientSocket) => {
+  // блокируем попытки туннелировать наш публичный хост через апстрим (петля)
+  const targetHost = (req.url || '').split(':')[0];
+  if (isSelfHost(targetHost)) {
+    try { clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); } catch {}
+    return clientSocket.end();
+  }
+
   const user = authenticate(req.headers['proxy-authorization']);
   if (!user) {
     clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="Proxy"\r\n\r\n');
